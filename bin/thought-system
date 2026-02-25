@@ -1,0 +1,183 @@
+#!/usr/bin/env node
+
+/**
+ * Thought System CLI
+ * 
+ * Command-line interface for managing the thought system.
+ */
+
+const { Command } = require('commander');
+const { Database } = require('../src/database');
+const { Updater } = require('../src/updater');
+const { APIServer } = require('../src/api');
+const { WebhookHandler } = require('../src/openclaw/webhook-handler');
+
+const program = new Command();
+
+program
+  .name('thought-system')
+  .description('Personal thought management system')
+  .version('1.0.0');
+
+// Start the API server
+program
+  .command('start')
+  .description('Start the API server')
+  .option('-p, --port <port>', 'Port to listen on', '3456')
+  .action((options) => {
+    const server = new APIServer({ port: parseInt(options.port) });
+    server.start();
+  });
+
+// Run database migrations
+program
+  .command('migrate')
+  .description('Run database migrations')
+  .action(async () => {
+    try {
+      const db = new Database();
+      await db.migrate();
+    } catch (error) {
+      console.error('Migration failed:', error.message);
+      process.exit(1);
+    }
+  });
+
+// Check for and install updates
+program
+  .command('update')
+  .description('Check for and install updates')
+  .option('-y, --yes', 'Auto-confirm update', false)
+  .action(async (options) => {
+    try {
+      const updater = new Updater();
+      const check = await updater.checkForUpdates();
+
+      if (!check.hasUpdate) {
+        console.log('✓ Already up to date');
+        return;
+      }
+
+      console.log(`Update available: ${check.current} → ${check.latest}`);
+
+      if (!options.yes) {
+        console.log('Run with --yes to auto-confirm');
+        return;
+      }
+
+      await updater.update();
+    } catch (error) {
+      console.error('Update check failed:', error.message);
+      process.exit(1);
+    }
+  });
+
+// Install cron jobs (when ready)
+program
+  .command('install-cron')
+  .description('Install cron jobs (manual step when ready)')
+  .action(async () => {
+    try {
+      const updater = new Updater();
+      await updater.installCronJobs();
+    } catch (error) {
+      console.error('Failed to install cron jobs:', error.message);
+      process.exit(1);
+    }
+  });
+
+// Ingest a thought
+program
+  .command('ingest <content>')
+  .description('Ingest a new thought')
+  .option('-t, --tags <tags>', 'Comma-separated tags')
+  .option('-s, --source <source>', 'Source of the thought', 'cli')
+  .action(async (content, options) => {
+    try {
+      const handler = new WebhookHandler();
+      const tags = options.tags ? options.tags.split(',').map(t => t.trim()) : [];
+      
+      const result = await handler.ingestThought({
+        content,
+        source: options.source,
+        tags
+      });
+
+      console.log(`✓ Thought ingested (id: ${result.lastID})`);
+    } catch (error) {
+      console.error('Failed to ingest thought:', error.message);
+      process.exit(1);
+    }
+  });
+
+// List recent thoughts
+program
+  .command('list')
+  .description('List recent thoughts')
+  .option('-n, --number <n>', 'Number of thoughts to show', '10')
+  .action(async (options) => {
+    try {
+      const handler = new WebhookHandler();
+      const thoughts = await handler.getRecentThoughts(parseInt(options.number));
+
+      if (thoughts.length === 0) {
+        console.log('No thoughts found');
+        return;
+      }
+
+      thoughts.forEach((thought, i) => {
+        const date = new Date(thought.created_at).toLocaleString();
+        const tags = JSON.parse(thought.tags || '[]').join(', ');
+        console.log(`\n${i + 1}. [${date}] ${tags ? `(${tags})` : ''}`);
+        console.log(`   ${thought.content.substring(0, 100)}${thought.content.length > 100 ? '...' : ''}`);
+      });
+    } catch (error) {
+      console.error('Failed to list thoughts:', error.message);
+      process.exit(1);
+    }
+  });
+
+// Search thoughts
+program
+  .command('search <query>')
+  .description('Search thoughts')
+  .action(async (query) => {
+    try {
+      const handler = new WebhookHandler();
+      const thoughts = await handler.searchThoughts(query);
+
+      if (thoughts.length === 0) {
+        console.log('No thoughts found');
+        return;
+      }
+
+      console.log(`Found ${thoughts.length} thought(s):\n`);
+      thoughts.forEach((thought, i) => {
+        const date = new Date(thought.created_at).toLocaleString();
+        console.log(`${i + 1}. [${date}]`);
+        console.log(`   ${thought.content.substring(0, 150)}${thought.content.length > 150 ? '...' : ''}`);
+      });
+    } catch (error) {
+      console.error('Search failed:', error.message);
+      process.exit(1);
+    }
+  });
+
+// Health check
+program
+  .command('health')
+  .description('Check API server health')
+  .action(async () => {
+    try {
+      const fetch = require('node-fetch');
+      const port = process.env.THOUGHT_SYSTEM_PORT || 3456;
+      const response = await fetch(`http://localhost:${port}/health`);
+      const data = await response.json();
+      console.log('Health status:', data.status);
+    } catch (error) {
+      console.error('Health check failed:', error.message);
+      process.exit(1);
+    }
+  });
+
+program.parse();
